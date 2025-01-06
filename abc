@@ -1,0 +1,266 @@
+<?php
+/*
+Plugin Name: Dynamic Tweet to Post
+Description: Fetch tweets and generate WordPress posts using ChatGPT based on custom prompts, Twitter data, or RSS feeds.
+Version: 1.4
+Author: Your Name
+*/
+
+// Exit if accessed directly
+if ( ! defined( 'ABSPATH' ) ) {
+    exit;
+}
+
+// Load translations
+add_action('init', 'dtp_load_textdomain');
+function dtp_load_textdomain() {
+    load_plugin_textdomain('dynamic-tweet-to-post', false, dirname(plugin_basename(__FILE__)) . '/languages/');
+}
+
+// Add admin menu and settings
+add_action('admin_menu', 'dtp_add_admin_menu');
+add_action('admin_init', 'dtp_settings_init');
+
+// Add custom cron schedule for every 5 minutes
+add_filter('cron_schedules', 'dtp_add_cron_schedule');
+function dtp_add_cron_schedule($schedules) {
+    $schedules['every_five_minutes'] = array(
+        'interval' => 300,
+        'display'  => __('Every 5 Minutes'),
+    );
+    return $schedules;
+}
+
+// Function to add the admin menu
+function dtp_add_admin_menu() {
+    add_options_page(
+        'Dynamic Tweet to Post',
+        'Dynamic Tweet to Post',
+        'manage_options',
+        'dynamic_tweet_to_post',
+        'dtp_options_page'
+    );
+}
+
+// Function to initialize settings
+function dtp_settings_init() {
+    register_setting('pluginPage', 'dtp_settings');
+
+    add_settings_section(
+        'dtp_pluginPage_section',
+        __('Plugin Settings', 'dynamic-tweet-to-post'),
+        null,
+        'pluginPage'
+    );
+
+    // OpenAI API Key
+    add_settings_field('dtp_openai_api_key', __('OpenAI API Key', 'dynamic-tweet-to-post'), 'dtp_openai_api_key_render', 'pluginPage', 'dtp_pluginPage_section');
+
+    // Twitter Bearer Token
+    add_settings_field('dtp_twitter_bearer_token', __('Twitter Bearer Token', 'dynamic-tweet-to-post'), 'dtp_twitter_bearer_token_render', 'pluginPage', 'dtp_pluginPage_section');
+
+    // Search Keywords
+    add_settings_field('dtp_search_keywords', __('Custom Search Keywords', 'dynamic-tweet-to-post'), 'dtp_search_keywords_render', 'pluginPage', 'dtp_pluginPage_section');
+
+    // Custom Prompt
+    add_settings_field('dtp_custom_prompt', __('Custom Prompt for Post Generation', 'dynamic-tweet-to-post'), 'dtp_custom_prompt_render', 'pluginPage', 'dtp_pluginPage_section');
+
+    // Number of Posts
+    add_settings_field('dtp_number_of_posts', __('Number of Posts to Generate', 'dynamic-tweet-to-post'), 'dtp_number_of_posts_render', 'pluginPage', 'dtp_pluginPage_section');
+
+    // Post Status
+    add_settings_field('dtp_post_status', __('Post Status', 'dynamic-tweet-to-post'), 'dtp_post_status_render', 'pluginPage', 'dtp_pluginPage_section');
+
+    // Schedule Frequency
+    add_settings_field('dtp_schedule_frequency', __('Schedule Frequency (in minutes)', 'dynamic-tweet-to-post'), 'dtp_schedule_frequency_render', 'pluginPage', 'dtp_pluginPage_section');
+}
+
+// Render Settings Fields
+function dtp_openai_api_key_render() {
+    $options = get_option('dtp_settings');
+    ?>
+    <input type='text' name='dtp_settings[dtp_openai_api_key]' value='<?php echo esc_attr($options['dtp_openai_api_key']); ?>'>
+    <?php
+}
+
+function dtp_twitter_bearer_token_render() {
+    $options = get_option('dtp_settings');
+    ?>
+    <input type='text' name='dtp_settings[dtp_twitter_bearer_token]' value='<?php echo esc_attr($options['dtp_twitter_bearer_token']); ?>'>
+    <?php
+}
+
+function dtp_search_keywords_render() {
+    $options = get_option('dtp_settings');
+    ?>
+    <input type='text' name='dtp_settings[dtp_search_keywords]' value='<?php echo esc_attr($options['dtp_search_keywords']); ?>'>
+    <?php
+}
+
+function dtp_custom_prompt_render() {
+    $options = get_option('dtp_settings');
+    ?>
+    <textarea name='dtp_settings[dtp_custom_prompt]' rows='5' cols='50'><?php echo esc_textarea($options['dtp_custom_prompt']); ?></textarea>
+    <?php
+}
+
+function dtp_number_of_posts_render() {
+    $options = get_option('dtp_settings');
+    ?>
+    <input type='number' name='dtp_settings[dtp_number_of_posts]' value='<?php echo esc_attr($options['dtp_number_of_posts']); ?>'>
+    <?php
+}
+
+function dtp_post_status_render() {
+    $options = get_option('dtp_settings');
+    ?>
+    <select name='dtp_settings[dtp_post_status]'>
+        <option value='draft' <?php selected($options['dtp_post_status'], 'draft'); ?>>Draft</option>
+        <option value='publish' <?php selected($options['dtp_post_status'], 'publish'); ?>>Publish</option>
+        <option value='pending' <?php selected($options['dtp_post_status'], 'pending'); ?>>Pending</option>
+    </select>
+    <?php
+}
+
+function dtp_schedule_frequency_render() {
+    $options = get_option('dtp_settings');
+    ?>
+    <input type='number' name='dtp_settings[dtp_schedule_frequency]' value='<?php echo esc_attr($options['dtp_schedule_frequency'] ?? 5); ?>' min="1">
+    <?php
+}
+
+// Options Page Markup
+function dtp_options_page() {
+    ?>
+    <form action='options.php' method='post'>
+        <h2>Dynamic Tweet to Post</h2>
+        <?php
+        settings_fields('pluginPage');
+        do_settings_sections('pluginPage');
+        submit_button();
+        ?>
+    </form>
+    <?php
+}
+
+// Schedule Event
+register_activation_hook(__FILE__, 'dtp_schedule_event');
+function dtp_schedule_event() {
+    if (!wp_next_scheduled('dtp_fetch_tweets_event')) {
+        wp_schedule_event(time(), 'every_five_minutes', 'dtp_fetch_tweets_event');
+    }
+}
+
+// Unschedule Event
+register_deactivation_hook(__FILE__, 'dtp_unschedule_event');
+function dtp_unschedule_event() {
+    $timestamp = wp_next_scheduled('dtp_fetch_tweets_event');
+    if ($timestamp) {
+        wp_unschedule_event($timestamp, 'dtp_fetch_tweets_event');
+    }
+}
+
+// Fetch Tweets
+function dtp_fetch_tweets($keywords) {
+    $options = get_option('dtp_settings');
+    $bearer_token = sanitize_text_field($options['dtp_twitter_bearer_token']);
+    
+    // Get the timestamp from the last fetch
+    $last_fetch_time = get_option('dtp_last_fetch_time', 0);
+    $current_time = time();
+    
+    // Calculate the time 6 hours ago
+    $six_hours_ago = $current_time - (6 * 60 * 60);
+    
+    // Update the last fetch time if it's older than 6 hours
+    if ($last_fetch_time < $six_hours_ago) {
+        $url = "https://api.twitter.com/2/tweets/search/recent?query=" . urlencode($keywords) . "&start_time=" . gmdate('Y-m-d\TH:i:s\Z', $six_hours_ago);
+        
+        $response = wp_remote_get($url, array(
+            'headers' => array(
+                'Authorization' => 'Bearer ' . $bearer_token,
+            ),
+        ));
+
+        // Check for errors in the response
+        if (is_wp_error($response)) {
+            error_log('Twitter API Error: ' . $response->get_error_message());
+            return [];
+        }
+
+        // Decode the response
+        $data = json_decode(wp_remote_retrieve_body($response), true);
+        
+        // Log the entire response for debugging
+        error_log('Twitter API Response: ' . print_r($data, true)); // Use print_r to log arrays
+
+        // Check if we received a 401 Unauthorized error
+        if (isset($data['status']) && $data['status'] === 401) {
+            error_log('Unauthorized access: ' . print_r($data, true));
+            return [];
+        }
+
+        // Check if there are tweets in the response
+        if (isset($data['data']) && is_array($data['data'])) {
+            // Log fetched tweets for debugging
+            error_log('Fetched Tweets: ' . print_r($data['data'], true));
+            // Update the last fetch time to now
+            update_option('dtp_last_fetch_time', $current_time);
+            return $data['data'];
+        } else {
+            error_log('No tweets found or API response error: ' . print_r($data, true));
+            return [];
+        }
+    } else {
+        error_log('No new tweets found since the last fetch.');
+        return [];
+    }
+}
+
+// Generate Posts
+function dtp_generate_posts($tweets) {
+    $options = get_option('dtp_settings');
+    $post_status = sanitize_text_field($options['dtp_post_status']);
+    $custom_prompt = sanitize_textarea_field($options['dtp_custom_prompt']);
+
+    foreach ($tweets as $tweet) {
+        $content = str_replace('{tweet}', sanitize_text_field($tweet['text']), $custom_prompt);
+        
+        // Log content for debugging
+        error_log('Generating content from tweet: ' . $content); // Ensure this is a string
+
+        $new_post = array(
+            'post_title'   => wp_trim_words($tweet['text'], 10),
+            'post_content' => $content,
+            'post_status'  => $post_status,
+            'post_author'  => get_current_user_id(),
+        );
+
+        $post_id = wp_insert_post($new_post);
+        
+        // Log post creation result
+        if (is_wp_error($post_id)) {
+            error_log('Post Creation Error: ' . $post_id->get_error_message());
+        } else {
+            error_log('Post created with ID: ' . $post_id);
+        }
+    }
+}
+
+// Fetch Tweets and Generate Posts
+add_action('dtp_fetch_tweets_event', 'dtp_execute');
+function dtp_execute() {
+    $options = get_option('dtp_settings');
+    $keywords = sanitize_text_field($options['dtp_search_keywords']);
+    
+    // Log the keywords being searched
+    error_log('Searching for tweets with keywords: ' . $keywords);
+    
+    $tweets = dtp_fetch_tweets($keywords);
+
+    if (!empty($tweets)) {
+        dtp_generate_posts($tweets);
+    } else {
+        error_log('No tweets found to generate posts.');
+    }
+}
